@@ -1,8 +1,5 @@
 (function() {
-    if (!window.geofs || !geofs.api?.viewer) {
-        alert("GeoFS not loaded yet!");
-        return;
-    }
+    if (!window.geofs || !geofs.api?.viewer) { alert("GeoFS not loaded yet!"); return; }
 
     const v = geofs.api.viewer;
     const gl = v.scene.globe;
@@ -12,7 +9,6 @@
     W.__walk = W.__walk || {};
     const S = W.__walk;
 
-    // Notification function
     function note(msg) {
         const d = document.createElement("div");
         d.textContent = msg;
@@ -24,10 +20,7 @@
         `;
         document.body.appendChild(d);
         setTimeout(() => d.style.opacity = 1, 20);
-        setTimeout(() => {
-            d.style.opacity = 0;
-            setTimeout(() => d.remove(), 300);
-        }, 2000);
+        setTimeout(() => { d.style.opacity = 0; setTimeout(() => d.remove(), 300); }, 2000);
     }
 
     const R = 6378137;
@@ -35,19 +28,13 @@
     const latM = m => (m / R) * 180 / Math.PI;
     const lonM = (m, la) => m / (R * Math.cos(rad(la))) * 180 / Math.PI;
 
-    function gnd(lon, lat) {
-        try {
-            return gl.getHeight(C.Cartographic.fromDegrees(lon, lat)) || 0;
-        } catch {
-            return 0;
-        }
-    }
+    function gnd(lon, lat) { try { return gl.getHeight(C.Cartographic.fromDegrees(lon, lat)) || 0; } catch { return 0; } }
 
     function setCam() {
         const p = C.Cartesian3.fromDegrees(S.lon, S.lat, S.alt);
         v.camera.setView({
             destination: p,
-            orientation: { heading: C.Math.toRadians(S.hdg || 0), pitch: C.Math.toRadians(-10), roll: 0 }
+            orientation: { heading: C.Math.toRadians(S.hdg || 0), pitch: C.Math.toRadians(S.pitch || -10), roll: 0 }
         });
     }
 
@@ -56,7 +43,9 @@
         S.lat = a.llaLocation[0];
         S.lon = a.llaLocation[1];
         S.hdg = a.heading || 0;
+        S.pitch = -10;
         S.alt = gnd(S.lon, S.lat) + 1.6;
+        S._t0 = performance.now(); // start time for head bob
     }
 
     function loop() {
@@ -65,6 +54,7 @@
         const dt = Math.min(.05, (now - S.t) / 1000);
         S.t = now;
 
+        // Movement
         let f = S.mvY, r = S.mvX;
         let L = Math.hypot(f, r) || 1;
         if (L > 0) { f /= L; r /= L; }
@@ -75,7 +65,13 @@
         const e = f * Math.sin(h) + r * Math.cos(h);
         S.lat += latM(n * sp);
         S.lon += lonM(e * sp, S.lat);
-        S.alt = gnd(S.lon, S.lat) + 1.6;
+
+        // Head bob
+        const moving = Math.abs(f) > 0 || Math.abs(r) > 0;
+        const bobAmp = 0.05; // meters
+        const bobFreq = 6; // Hz
+        const bobOffset = moving ? bobAmp * Math.sin(((now - S._t0) / 1000) * bobFreq * 2 * Math.PI) : 0;
+        S.alt = gnd(S.lon, S.lat) + 1.6 + bobOffset;
 
         setCam();
     }
@@ -94,10 +90,7 @@
     }
 
     spawn();
-    S.mvX = 0;
-    S.mvY = 0;
-    S.mvRun = false;
-    S.t = performance.now();
+    S.mvX = 0; S.mvY = 0; S.mvRun = false; S.t = performance.now();
     S._lp = () => loop();
     v.scene.postRender.addEventListener(S._lp);
 
@@ -107,7 +100,7 @@
         el.style.display = "none";
     });
 
-    // Add joystick
+    // Left joystick
     S._css = document.createElement("style");
     S._css.textContent = `
         #waJoy{position:fixed;left:20px;bottom:20px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.2);z-index:9999;touch-action:none}
@@ -122,65 +115,41 @@
 
     const J = S._joy, ST = J.firstChild;
     let act = false, cx = 0, cy = 0, id = 0;
-
     const st = (dx, dy) => ST.style.transform = `translate(${dx}px,${dy}px)`;
+    const start = e => { act = true; const t = e.touches[0]; const r = J.getBoundingClientRect(); cx = r.left + r.width / 2; cy = r.top + r.height / 2; id = t.identifier; e.preventDefault(); };
+    const move = e => { if (!act) return; const t = [...e.touches].find(x => x.identifier === id); if (!t) return; let dx = t.clientX - cx, dy = t.clientY - cy; let m = 40, l = Math.hypot(dx, dy) || 1, k = l > m ? m / l : 1; dx *= k; dy *= k; st(dx, dy); S.mvX = dx / m; S.mvY = -dy / m; e.preventDefault(); };
+    const end = () => { act = false; st(0,0); S.mvX = 0; S.mvY = 0; };
+    J.addEventListener("touchstart", start, { passive:false });
+    J.addEventListener("touchmove", move, { passive:false });
+    J.addEventListener("touchend", end, { passive:false });
 
-    const start = e => {
-        act = true;
-        const t = e.touches[0];
-        const r = J.getBoundingClientRect();
-        cx = r.left + r.width / 2;
-        cy = r.top + r.height / 2;
-        id = t.identifier;
-        e.preventDefault();
-    };
-    const move = e => {
-        if (!act) return;
-        const t = [...e.touches].find(x => x.identifier === id);
-        if (!t) return;
-        let dx = t.clientX - cx, dy = t.clientY - cy;
-        let m = 40, l = Math.hypot(dx, dy) || 1, k = l > m ? m / l : 1;
-        dx *= k; dy *= k;
-        st(dx, dy);
-        S.mvX = dx / m;
-        S.mvY = -dy / m;
-        e.preventDefault();
-    };
-    const end = () => { act = false; st(0, 0); S.mvX = 0; S.mvY = 0; };
-
-    J.addEventListener("touchstart", start, { passive: false });
-    J.addEventListener("touchmove", move, { passive: false });
-    J.addEventListener("touchend", end, { passive: false });
-
-    // Right-side swipe for yaw
-    let rot = false, rx = 0, rid = 0;
+    // Right-side swipe for yaw + pitch
+    let rot = false, rx = 0, ry = 0, rid = 0;
     function rStart(e) {
         const t = [...e.touches].find(x => x.clientX > window.innerWidth / 2);
         if (!t) return;
-        rot = true;
-        rx = t.clientX;
-        rid = t.identifier;
-        e.preventDefault();
+        rot = true; rx = t.clientX; ry = t.clientY; rid = t.identifier; e.preventDefault();
     }
     function rMove(e) {
         if (!rot) return;
         const t = [...e.touches].find(x => x.identifier === rid);
         if (!t) return;
         let dx = t.clientX - rx;
-        S.hdg = (S.hdg + dx * 0.1) % 360;
-        rx = t.clientX;
+        let dy = t.clientY - ry;
+        S.hdg = (S.hdg + dx * 0.3) % 360; // more sensitive yaw
+        S.pitch = Math.min(Math.max(S.pitch - dy * 0.2, -89), 0); // pitch up/down
+        rx = t.clientX; ry = t.clientY;
         e.preventDefault();
     }
     function rEnd() { rot = false; }
 
-    document.addEventListener("touchstart", rStart, { passive: false });
-    document.addEventListener("touchmove", rMove, { passive: false });
-    document.addEventListener("touchend", rEnd, { passive: false });
+    document.addEventListener("touchstart", rStart, { passive:false });
+    document.addEventListener("touchmove", rMove, { passive:false });
+    document.addEventListener("touchend", rEnd, { passive:false });
 
-    // Disable default camera movement while walking
     const c = v.scene.screenSpaceCameraController;
     c.enableRotate = c.enableZoom = c.enableTilt = c.enableTranslate = false;
 
     S.on = true;
-    note("Walk ON — joystick + swipe right side to turn");
+    note("Walk ON — joystick + swipe right side for look + head bob");
 })();

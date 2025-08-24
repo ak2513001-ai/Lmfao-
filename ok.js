@@ -28,13 +28,13 @@
     const latM = m => (m / R) * 180 / Math.PI;
     const lonM = (m, la) => m / (R * Math.cos(rad(la))) * 180 / Math.PI;
 
-    function gnd(lon, lat) { try { return gl.getHeight(C.Cartographic.fromDegrees(lon, lat)) || 0; } catch { return 0; } }
+    function getGround(lon, lat) { try { return gl.getHeight(C.Cartographic.fromDegrees(lon, lat)) || 0; } catch { return 0; } }
 
     function setCam() {
         const p = C.Cartesian3.fromDegrees(S.lon, S.lat, S.alt);
         v.camera.setView({
             destination: p,
-            orientation: { heading: C.Math.toRadians(S.hdg || 0), pitch: C.Math.toRadians(S.pitch || -10), roll: 0 }
+            orientation: { heading: C.Math.toRadians(S.hdgCurrent), pitch: C.Math.toRadians(S.pitchCurrent), roll: 0 }
         });
     }
 
@@ -43,10 +43,15 @@
         S.lat = a.llaLocation[0];
         S.lon = a.llaLocation[1];
         S.hdg = a.heading || 0;
-        S.pitch = -10;
-        S.alt = gnd(S.lon, S.lat) + 1.6;
-        S._t0 = performance.now(); // start time for head bob
+        S.pitch = 0;
+        S.hdgCurrent = S.hdg;
+        S.pitchCurrent = S.pitch;
+        S.alt = getGround(S.lon, S.lat) + 1.6;
+        S._t0 = performance.now();
+        S._bobPhase = 0;
     }
+
+    function lerp(a, b, t) { return a + (b - a) * t; }
 
     function loop() {
         if (!S.on) return;
@@ -54,37 +59,41 @@
         const dt = Math.min(.05, (now - S.t) / 1000);
         S.t = now;
 
+        // Smooth yaw/pitch interpolation
+        const smoothFactor = 0.15; // smaller = slower smoothing
+        S.hdgCurrent = lerp(S.hdgCurrent, S.hdg, smoothFactor);
+        S.pitchCurrent = lerp(S.pitchCurrent, S.pitch, smoothFactor);
+
         // Movement
         let f = S.mvY, r = S.mvX;
-        let L = Math.hypot(f, r) || 1;
+        const L = Math.hypot(f, r);
         if (L > 0) { f /= L; r /= L; }
 
         const sp = (S.mvRun ? 7 : 4) * dt;
-        const h = rad(S.hdg || 0);
+        const h = rad(S.hdgCurrent);
         const n = f * Math.cos(h) - r * Math.sin(h);
         const e = f * Math.sin(h) + r * Math.cos(h);
         S.lat += latM(n * sp);
         S.lon += lonM(e * sp, S.lat);
 
         // Head bob
-        const moving = Math.abs(f) > 0 || Math.abs(r) > 0;
-        const bobAmp = 0.05; // meters
-        const bobFreq = 6; // Hz
-        const bobOffset = moving ? bobAmp * Math.sin(((now - S._t0) / 1000) * bobFreq * 2 * Math.PI) : 0;
-        S.alt = gnd(S.lon, S.lat) + 1.6 + bobOffset;
+        const speed = Math.hypot(f, r) * (S.mvRun ? 2 : 1);
+        S._bobPhase += dt * speed * 6;
+        const bobOffset = Math.sin(S._bobPhase) * 0.03;
+
+        // Smooth altitude
+        const targetAlt = getGround(S.lon, S.lat) + 1.6 + bobOffset;
+        S.alt = lerp(S.alt, targetAlt, 0.2);
 
         setCam();
     }
 
-    // Toggle walk mode
     if (S.on) {
         v.scene.postRender.removeEventListener(S._lp);
         if (S._joy) S._joy.remove();
         if (S._css) S._css.remove();
         (S.hid || []).forEach(([el, d]) => el.style.display = d || "");
         S.on = false;
-        const c = v.scene.screenSpaceCameraController;
-        c.enableRotate = c.enableZoom = c.enableTilt = c.enableTranslate = true;
         note("Walk OFF");
         return;
     }
@@ -116,6 +125,7 @@
     const J = S._joy, ST = J.firstChild;
     let act = false, cx = 0, cy = 0, id = 0;
     const st = (dx, dy) => ST.style.transform = `translate(${dx}px,${dy}px)`;
+
     const start = e => { act = true; const t = e.touches[0]; const r = J.getBoundingClientRect(); cx = r.left + r.width / 2; cy = r.top + r.height / 2; id = t.identifier; e.preventDefault(); };
     const move = e => { if (!act) return; const t = [...e.touches].find(x => x.identifier === id); if (!t) return; let dx = t.clientX - cx, dy = t.clientY - cy; let m = 40, l = Math.hypot(dx, dy) || 1, k = l > m ? m / l : 1; dx *= k; dy *= k; st(dx, dy); S.mvX = dx / m; S.mvY = -dy / m; e.preventDefault(); };
     const end = () => { act = false; st(0,0); S.mvX = 0; S.mvY = 0; };
@@ -123,10 +133,10 @@
     J.addEventListener("touchmove", move, { passive:false });
     J.addEventListener("touchend", end, { passive:false });
 
-    // Right-side swipe for yaw + pitch
+    // Full-screen swipe for yaw + pitch
     let rot = false, rx = 0, ry = 0, rid = 0;
     function rStart(e) {
-        const t = [...e.touches].find(x => x.clientX > window.innerWidth / 2);
+        const t = [...e.touches].find(x => x.clientX > 140 || x.clientY < window.innerHeight);
         if (!t) return;
         rot = true; rx = t.clientX; ry = t.clientY; rid = t.identifier; e.preventDefault();
     }
@@ -134,12 +144,11 @@
         if (!rot) return;
         const t = [...e.touches].find(x => x.identifier === rid);
         if (!t) return;
-        let dx = t.clientX - rx;
-        let dy = t.clientY - ry;
-        S.hdg = (S.hdg + dx * 0.3) % 360; // more sensitive yaw
-        S.pitch = Math.min(Math.max(S.pitch - dy * 0.2, -89), 0); // pitch up/down
-        rx = t.clientX; ry = t.clientY;
-        e.preventDefault();
+        const dx = t.clientX - rx;
+        const dy = t.clientY - ry;
+        S.hdg = (S.hdg + dx * 0.5) % 360; // horizontal target
+        S.pitch = Math.min(Math.max(S.pitch - dy * 0.2, -89), 89); // vertical target
+        rx = t.clientX; ry = t.clientY; e.preventDefault();
     }
     function rEnd() { rot = false; }
 
@@ -147,9 +156,6 @@
     document.addEventListener("touchmove", rMove, { passive:false });
     document.addEventListener("touchend", rEnd, { passive:false });
 
-    const c = v.scene.screenSpaceCameraController;
-    c.enableRotate = c.enableZoom = c.enableTilt = c.enableTranslate = false;
-
     S.on = true;
-    note("Walk ON — joystick + swipe right side for look + head bob");
+    note("Walk ON — joystick + smooth turning + head bob");
 })();
